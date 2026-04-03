@@ -6,6 +6,8 @@ const pdfParse = require('pdf-parse');
 const { Pool } = require('pg');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const rateLimit = require('express-rate-limit');
+const vision = require('@google-cloud/vision');
+const { Storage } = require('@google-cloud/storage');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -20,7 +22,7 @@ app.use(express.json());
 
 // Rate limiting
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
@@ -28,7 +30,7 @@ const generalLimiter = rateLimit({
 });
 
 const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
@@ -37,10 +39,10 @@ const uploadLimiter = rateLimit({
 
 app.use('/api/contracts', generalLimiter);
 
-// Multer memory storage (no disk writes)
+// Multer memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB para PDFs grandes
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -52,7 +54,7 @@ const upload = multer({
 
 // PostgreSQL connection pool
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postres@localhost:5432/postgres',
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postres@localhost:5432/datos',
 });
 
 // Gemini AI client
@@ -60,7 +62,20 @@ const genAI = process.env.GEMINI_API_KEY
   ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
   : null;
 
-// Initialize database table
+// Google Cloud Storage client
+const storage = process.env.GCS_BUCKET_NAME
+  ? new Storage()
+  : null;
+
+// Google Cloud Vision API pricing constants
+const VISION_FREE_TIER_PAGES = 1000;
+const VISION_COST_PER_PAGE = 0.0015;
+
+// Gemini 2.5 Flash token pricing constants (USD per token)
+const GEMINI_INPUT_TOKEN_COST = 0.0000003;
+const GEMINI_OUTPUT_TOKEN_COST = 0.0000025;
+
+// Initialize database table — adds tokens and vision_pages columns if they don't exist
 async function initDatabase() {
   try {
     await pool.query(`
@@ -78,10 +93,17 @@ async function initDatabase() {
         notas                  TEXT,
         tipo_documento         TEXT,
         estado                 TEXT DEFAULT 'pendiente',
+        tokens                 JSONB,
+        vision_pages           JSONB,
         created_at             TIMESTAMP DEFAULT NOW()
       )
     `);
-    console.log('✅ Tabla "registros" lista en PostgreSQL');
+
+    // Agregar columnas si la tabla ya existía sin ellas
+    await pool.query(`ALTER TABLE registros ADD COLUMN IF NOT EXISTS tokens JSONB`);
+    await pool.query(`ALTER TABLE registros ADD COLUMN IF NOT EXISTS vision_pages JSONB`);
+
+    console.log('✅ Tabla "registros" lista en PostgreSQL (con campos tokens y vision_pages)');
   } catch (err) {
     console.error('❌ Error al inicializar la base de datos:', err.message);
   }
@@ -95,47 +117,152 @@ function normalizeDate(value) {
   return d.toISOString().split('T')[0];
 }
 
-// Extract text via Google Cloud Vision OCR (REST API using API key)
-async function extractTextWithVision(buffer) {
-  const apiKey = process.env.GOOGLE_VISION_API_KEY;
-  if (!apiKey) throw new Error('GOOGLE_VISION_API_KEY not configured');
+// ─── OCR via Google Cloud Storage (sin límite de páginas) ─────────────────────
+async function extractTextWithVisionGCS(buffer, filename) {
+  const bucketName = process.env.GCS_BUCKET_NAME;
+  if (!bucketName) throw new Error('GCS_BUCKET_NAME no está configurado');
 
-  console.log('🔍 Usando Google Cloud Vision para OCR...');
-  const base64 = buffer.toString('base64');
+  const bucket = storage.bucket(bucketName);
+  const uniqueName = `ocr-temp/${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+  const outputPrefix = `ocr-output/${Date.now()}-output`;
 
-  const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [{
-          image: { content: base64 },
-          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-        }],
-      }),
+  console.log(`☁️  Subiendo PDF a GCS: gs://${bucketName}/${uniqueName}`);
+
+  // 1. Subir PDF a GCS
+  const file = bucket.file(uniqueName);
+  await file.save(buffer, { contentType: 'application/pdf' });
+  console.log('✅ PDF subido a GCS correctamente');
+
+  // 2. Llamar a Vision API para procesar todas las páginas
+  const visionClient = new vision.ImageAnnotatorClient();
+  const inputConfig = {
+    mimeType: 'application/pdf',
+    gcsSource: { uri: `gs://${bucketName}/${uniqueName}` },
+  };
+  const outputConfig = {
+    gcsDestination: { uri: `gs://${bucketName}/${outputPrefix}` },
+    batchSize: 10, // páginas por archivo de output
+  };
+
+  console.log('🔍 Iniciando OCR asíncrono con Vision API (todas las páginas)...');
+  const [operation] = await visionClient.asyncBatchAnnotateFiles({
+    requests: [{
+      inputConfig,
+      features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+      outputConfig,
+    }],
+  });
+
+  // 3. Esperar a que termine el OCR
+  console.log('⏳ Esperando resultado del OCR...');
+  const [filesResponse] = await operation.promise();
+  console.log('✅ OCR asíncrono completado');
+
+  // 4. Leer los archivos de output de GCS
+  const outputUriPrefix = filesResponse.responses[0]?.outputConfig?.gcsDestination?.uri || `gs://${bucketName}/${outputPrefix}`;
+  const outputBucketPath = outputUriPrefix.replace(`gs://${bucketName}/`, '');
+
+  const [outputFiles] = await bucket.getFiles({ prefix: outputBucketPath });
+  console.log(`📄 Archivos de output encontrados: ${outputFiles.length}`);
+
+  let fullText = '';
+  let totalPages = 0;
+
+  for (const outputFile of outputFiles) {
+    const [content] = await outputFile.download();
+    const json = JSON.parse(content.toString());
+    for (const response of json.responses || []) {
+      const pageText = response.fullTextAnnotation?.text || '';
+      fullText += pageText + '\n';
+      totalPages++;
     }
-  );
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Vision API error: ${err}`);
+    // Borrar archivo de output
+    await outputFile.delete();
+    console.log(`🗑️  Output eliminado: ${outputFile.name}`);
   }
 
-  const data = await response.json();
-  const text = data.responses?.[0]?.fullTextAnnotation?.text || '';
-  console.log(`✅ OCR completado. Caracteres extraídos: ${text.length}`);
-  return text;
+  // 5. Borrar el PDF original de GCS
+  await file.delete();
+  console.log(`🗑️  PDF original eliminado de GCS: ${uniqueName}`);
+
+  console.log(`✅ OCR completado. Páginas procesadas: ${totalPages} | Caracteres: ${fullText.length}`);
+  return { text: fullText, pages: totalPages };
 }
 
-// Analyze text with Gemini 2.5 Flash
+// ─── OCR inline (fallback, máximo 5 páginas) ──────────────────────────────────
+async function extractTextWithVisionInline(buffer) {
+  console.log('🔍 Usando Google Cloud Vision (inline, hasta 5 páginas)...');
+  console.log(`📦 Credenciales: ${process.env.GOOGLE_APPLICATION_CREDENTIALS}`);
+
+  const client = new vision.ImageAnnotatorClient();
+  const base64 = buffer.toString('base64');
+  console.log(`📄 Buffer en base64. Tamaño: ${base64.length} caracteres`);
+
+  let response;
+  try {
+    [response] = await client.batchAnnotateFiles({
+      requests: [{
+        inputConfig: {
+          mimeType: 'application/pdf',
+          content: base64,
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        pages: Array.from({ length: 20 }, (_, i) => i + 1),
+      }],
+    });
+  } catch (err) {
+    // Si falla con muchas páginas, intenta con 5
+    console.warn('⚠️ Fallback a 5 páginas por límite de Vision API inline');
+    [response] = await client.batchAnnotateFiles({
+      requests: [{
+        inputConfig: {
+          mimeType: 'application/pdf',
+          content: base64,
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        pages: [1, 2, 3, 4, 5],
+      }],
+    });
+  }
+
+  console.log('✅ Respuesta recibida de Vision API');
+
+  const text = response.responses
+    ?.flatMap(r => r.responses || [])
+    ?.map(r => r.fullTextAnnotation?.text || '')
+    .join('\n') || '';
+
+  const pages = response.responses?.flatMap(r => r.responses || []).length || 0;
+
+  console.log(`✅ OCR completado. Páginas: ${pages} | Caracteres: ${text.length}`);
+  console.log(`📋 Muestra: ${text.slice(0, 300)}`);
+  return { text, pages };
+}
+
+// ─── Función principal de OCR — elige GCS o inline automáticamente ────────────
+async function extractTextWithVision(buffer, filename) {
+  if (process.env.GCS_BUCKET_NAME && storage) {
+    console.log('☁️  Modo GCS activado — procesará todas las páginas del PDF');
+    try {
+      return await extractTextWithVisionGCS(buffer, filename);
+    } catch (gcsErr) {
+      console.error('❌ Error en GCS, intentando modo inline:', gcsErr.message);
+      return await extractTextWithVisionInline(buffer);
+    }
+  } else {
+    console.log('📄 Modo inline activado (configura GCS_BUCKET_NAME para procesar todas las páginas)');
+    return await extractTextWithVisionInline(buffer);
+  }
+}
+
+// ─── Analyze text with Gemini 2.5 Flash ───────────────────────────────────────
 async function analyzeWithGemini(text) {
   if (!genAI) throw new Error('GEMINI_API_KEY no está configurada');
 
   console.log('🤖 Enviando texto a Gemini 2.5 Flash...');
   const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-  const prompt = `Como un analista tecnológico legal, analiza el siguiente texto de un contrato y extrae la información en formato JSON con exactamente esta estructura:
+  const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura:
 {
   "fecha_inicio": "YYYY-MM-DD o null",
   "fecha_fin": "YYYY-MM-DD o null",
@@ -149,6 +276,31 @@ async function analyzeWithGemini(text) {
   "Penalizacion_sla": "string o null",
   "notas": "string con observaciones adicionales relevantes o null"
 }
+
+INSTRUCCIONES IMPORTANTES:
+
+Para "TerminacionAnticipada" debes buscar si el contrato menciona alguna de estas variantes:
+- "terminación del contrato"
+- "rescisión del contrato"
+- "rescisión anticipada"
+- "dar por terminado antes"
+- "terminar anticipadamente"
+- "derecho a rescindir"
+- "cualquiera de las partes podrá dar por terminado"
+- "podrá terminar el contrato"
+- "finalización anticipada"
+Si encuentra CUALQUIERA de estas frases o frases similares que impliquen que el contrato puede terminar antes de su fecha fin → TerminacionAnticipada: true
+Si NO encuentra ninguna mención → TerminacionAnticipada: false
+
+Para "fecha_inicio" y "fecha_fin":
+- Busca frases como "vigencia", "plazo", "duración", "a partir del", "hasta el"
+- Convierte fechas escritas en texto a formato YYYY-MM-DD
+- Ejemplo: "primero de enero de dos mil veinticuatro" → "2024-01-01"
+
+Para "Penalizacion_sla":
+- Busca montos, porcentajes o descripciones de penalizaciones por incumplimiento
+- Ejemplo: "10% del valor mensual del servicio"
+
 Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.
 
 Texto del contrato:
@@ -156,18 +308,35 @@ ${text}`;
 
   const result = await model.generateContent(prompt);
   const responseText = result.response.text();
-  console.log('✅ Respuesta de Gemini recibida');
-  return responseText;
+
+  // Calcular tokens y costo
+  const usage = result.response.usageMetadata;
+  const inputTokens = usage?.promptTokenCount || 0;
+  const outputTokens = usage?.candidatesTokenCount || 0;
+  const totalTokens = usage?.totalTokenCount || 0;
+  const costUSD = ((inputTokens * GEMINI_INPUT_TOKEN_COST) + (outputTokens * GEMINI_OUTPUT_TOKEN_COST)).toFixed(6);
+
+  console.log(`✅ Respuesta de Gemini recibida`);
+  console.log(`📊 Tokens — Input: ${inputTokens} | Output: ${outputTokens} | Total: ${totalTokens}`);
+  console.log(`💰 Costo estimado Gemini: $${costUSD} USD`);
+
+  return {
+    text: responseText,
+    tokens: {
+      input: inputTokens,
+      output: outputTokens,
+      total: totalTokens,
+      costo_usd: parseFloat(costUSD),
+    },
+  };
 }
 
 // Parse and clean Gemini JSON response
 function parseGeminiResponse(responseText) {
-  // Remove markdown code blocks if present
   let cleaned = responseText
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/gi, '')
     .trim();
-
   return JSON.parse(cleaned);
 }
 
@@ -187,7 +356,8 @@ app.get('/api/health', generalLimiter, async (req, res) => {
     status: 'ok',
     database: dbStatus,
     gemini: process.env.GEMINI_API_KEY ? 'configured' : 'not configured',
-    vision: process.env.GOOGLE_VISION_API_KEY ? 'configured' : 'not configured',
+    vision: process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'configured' : 'not configured',
+    gcs: process.env.GCS_BUCKET_NAME ? `configured (${process.env.GCS_BUCKET_NAME})` : 'not configured (modo inline, máx 5 páginas)',
   });
 });
 
@@ -195,9 +365,7 @@ app.get('/api/health', generalLimiter, async (req, res) => {
 app.get('/api/contracts', generalLimiter, async (req, res) => {
   try {
     console.log('📋 Obteniendo historial de contratos...');
-    const result = await pool.query(
-      'SELECT * FROM registros ORDER BY id DESC'
-    );
+    const result = await pool.query('SELECT * FROM registros ORDER BY id DESC');
     res.json(result.rows);
   } catch (err) {
     console.error('❌ Error al obtener contratos:', err.message);
@@ -211,18 +379,15 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
     const { requisicion } = req.body;
     const file = req.file;
 
-    if (!file) {
-      return res.status(400).json({ error: 'No se recibió ningún archivo PDF' });
-    }
-    if (!requisicion) {
-      return res.status(400).json({ error: 'El número de requisición es requerido' });
-    }
+    if (!file) return res.status(400).json({ error: 'No se recibió ningún archivo PDF' });
+    if (!requisicion) return res.status(400).json({ error: 'El número de requisición es requerido' });
 
     console.log(`\n📄 Procesando contrato: ${file.originalname} | Requisición: ${requisicion}`);
 
-    // Step 1: Try to extract text from PDF
+    // Step 1: Intentar extraer texto con pdf-parse
     let extractedText = '';
     let tipoDocumento = 'digital';
+    let visionData = null;
 
     console.log('🔎 Extrayendo texto del PDF con pdf-parse...');
     try {
@@ -234,7 +399,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       extractedText = '';
     }
 
-    // Step 2: Determine document type and extract text accordingly
+    // Step 2: Determinar si es digital o escaneado
     if (extractedText.trim().length > 50) {
       console.log('✅ PDF digital detectado — usando texto extraído directamente');
       tipoDocumento = 'digital';
@@ -242,13 +407,25 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       console.log('🖼️ PDF escaneado detectado — se requiere OCR');
       tipoDocumento = 'ocr';
 
-      if (!process.env.GOOGLE_VISION_API_KEY) {
+      if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
         return res.status(422).json({
           error: 'El documento parece ser una imagen escaneada. Por favor sube una versión digital del contrato, o configura Google Vision API para habilitar OCR.',
         });
       }
 
-      extractedText = await extractTextWithVision(file.buffer);
+      const ocrResult = await extractTextWithVision(file.buffer, file.originalname);
+      extractedText = ocrResult.text;
+
+      // Calcular costo de Vision API
+      const visionPages = ocrResult.pages || 0;
+      const visionCostUSD = visionPages <= VISION_FREE_TIER_PAGES ? 0 : (visionPages * VISION_COST_PER_PAGE).toFixed(6);
+      visionData = {
+        paginas: visionPages,
+        costo_usd: parseFloat(visionCostUSD),
+        modo: process.env.GCS_BUCKET_NAME ? 'gcs' : 'inline',
+      };
+
+      console.log(`📊 Vision — Páginas: ${visionPages} | Costo: $${visionCostUSD} USD | Modo: ${visionData.modo}`);
 
       if (!extractedText || extractedText.trim().length < 10) {
         return res.status(422).json({
@@ -257,28 +434,29 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       }
     }
 
-    // Step 3: Analyze with Gemini
-    const geminiRaw = await analyzeWithGemini(extractedText);
+    // Step 3: Analizar con Gemini
+    const geminiResult = await analyzeWithGemini(extractedText);
 
-    // Step 4: Parse Gemini response
+    // Step 4: Parsear respuesta de Gemini
     let geminiData;
     try {
-      geminiData = parseGeminiResponse(geminiRaw);
+      geminiData = parseGeminiResponse(geminiResult.text);
     } catch (parseErr) {
-      console.error('❌ Error al parsear respuesta de Gemini:', geminiRaw);
+      console.error('❌ Error al parsear respuesta de Gemini:', geminiResult.text);
       return res.status(500).json({ error: 'Error al procesar la respuesta de Gemini. Intenta de nuevo.' });
     }
 
-    // Step 5: Normalize dates
+    // Step 5: Normalizar fechas
     const fechaInicio = normalizeDate(geminiData.fecha_inicio);
     const fechaFin = normalizeDate(geminiData.fecha_fin);
 
-    // Step 6: Save to PostgreSQL
+    // Step 6: Guardar en PostgreSQL con tokens y vision_pages
     console.log('💾 Guardando en PostgreSQL...');
     const insertResult = await pool.query(
       `INSERT INTO registros
-        (requisicion, proveedor, contratante, inicio, fin, tipo_sla, descripcion_sla, penalizacion, terminacion_anticipada, notas, tipo_documento, estado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'completado')
+        (requisicion, proveedor, contratante, inicio, fin, tipo_sla, descripcion_sla,
+         penalizacion, terminacion_anticipada, notas, tipo_documento, estado, tokens, vision_pages)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'completado', $12, $13)
        RETURNING *`,
       [
         requisicion,
@@ -292,16 +470,22 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
         geminiData.TerminacionAnticipada === true,
         geminiData.notas || null,
         tipoDocumento,
+        JSON.stringify(geminiResult.tokens),
+        visionData ? JSON.stringify(visionData) : null,
       ]
     );
 
     const savedRecord = insertResult.rows[0];
     console.log(`✅ Contrato guardado con ID: ${savedRecord.id}`);
 
-    // Step 7: Return result
+    // Step 7: Retornar resultado
     res.json({
       success: true,
       tipo_documento: tipoDocumento,
+      consumo: {
+        tokens: geminiResult.tokens,
+        vision: visionData,
+      },
       data: {
         id: savedRecord.id,
         requisicion: savedRecord.requisicion,
@@ -328,13 +512,11 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'El archivo excede el tamaño máximo de 10MB' });
+      return res.status(400).json({ error: 'El archivo excede el tamaño máximo de 50MB' });
     }
     return res.status(400).json({ error: err.message });
   }
-  if (err) {
-    return res.status(400).json({ error: err.message });
-  }
+  if (err) return res.status(400).json({ error: err.message });
   next();
 });
 
@@ -343,9 +525,11 @@ async function start() {
   await initDatabase();
   app.listen(PORT, () => {
     console.log(`\n🚀 Backend corriendo en http://localhost:${PORT}`);
-    console.log(`📊 Gemini: ${process.env.GEMINI_API_KEY ? '✅ configurado' : '❌ no configurado'}`);
-    console.log(`👁️  Vision: ${process.env.GOOGLE_VISION_API_KEY ? '✅ configurado' : '❌ no configurado'}`);
+    console.log(`📊 Gemini:  ${process.env.GEMINI_API_KEY ? '✅ configurado' : '❌ no configurado'}`);
+    console.log(`👁️  Vision:  ${process.env.GOOGLE_APPLICATION_CREDENTIALS ? '✅ configurado' : '❌ no configurado'}`);
+    console.log(`☁️  GCS:     ${process.env.GCS_BUCKET_NAME ? `✅ bucket: ${process.env.GCS_BUCKET_NAME}` : '⚠️  no configurado (modo inline, máx 5 páginas)'}`);
   });
 }
 
 start();
+
