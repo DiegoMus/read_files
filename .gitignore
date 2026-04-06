@@ -2,6 +2,7 @@
 node_modules/
 dist/
 build/
+credentials/
 
 # Environment
 .env
@@ -17,3 +18,5 @@ Thumbs.db
 
 # Uploads (temporary files)
 uploads/
+credentials/concursos-umg-2020-6e47a7b586f3.json
+credentials/concursos-umg-2020-6e47a7b586f3.json

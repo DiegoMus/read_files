@@ -259,6 +259,12 @@ async function extractTextWithVision(buffer, filename) {
 async function analyzeWithOllama(text) {
   const model = process.env.LOCAL_MODEL || 'deepseek-r1:32b';
   console.log(`🤖 Enviando texto a Ollama (${model}) — modo local...`);
+    // Truncar texto si es muy largo para el modelo local
+  const maxChars = 50000;
+  if (text.length > maxChars) {
+    console.log(`⚠️  Texto truncado de ${text.length} a ${maxChars} caracteres para modelo local`);
+    text = text.slice(0, maxChars);
+  }
 
   const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura:
 {
@@ -272,7 +278,7 @@ async function analyzeWithOllama(text) {
   "Contratante": "string",
   "Proveedor": "string",
   "Penalizacion_sla": "string o null",
-  "notas": "string con observaciones adicionales relevantes o null"
+  "notas": "string con la descripción del servicio y elementos adicionales o null"
 }
 
 INSTRUCCIONES IMPORTANTES:
@@ -298,6 +304,9 @@ Para "fecha_inicio" y "fecha_fin":
 Para "Penalizacion_sla":
 - Busca montos, porcentajes o descripciones de penalizaciones por incumplimiento
 
+Para ="tipo_de_SLA":
+- Busca si el contrato menciona algún tipo específico de SLA (ejemplo: "SLA de disponibilidad", "SLA de soporte", "SLA de rendimiento") y extrae esa información como "tipo_de_SLA". Si no se menciona un tipo específico, puedes dejarlo como null o "general".
+
 Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.
 
 Texto del contrato:
@@ -310,7 +319,12 @@ ${text}`;
       model,
       prompt,
       stream: false,
-      format: 'json',
+      //format: 'json',
+      options: {
+        num_ctx: 32768,
+        temperature: 0.1,
+        think: false,
+      },
     }),
   });
 
@@ -324,9 +338,21 @@ ${text}`;
   console.log(`📊 Tokens — Input: ${data.prompt_eval_count} | Output: ${data.eval_count}`);
   console.log(`⏱️  Tiempo: ${(data.total_duration / 1e9).toFixed(1)} segundos`);
   console.log(`💰 Costo: $0.00 USD (modelo local)`);
+  console.log(`📋 Respuesta raw: ${data.response?.slice(0, 200)}`);
+
+  // Limpiar thinking de Qwen3 y markdown
+  const responseClean = (data.response || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/gi, '')
+    .trim();
+
+  console.log(`📋 Respuesta limpia: ${responseClean.slice(0, 200)}`);
 
   return {
-    text: data.response,
+    text: responseClean,
+
+
     tokens: {
       input: data.prompt_eval_count || 0,
       output: data.eval_count || 0,
@@ -357,7 +383,7 @@ async function analyzeWithGemini(text) {
   "Contratante": "string",
   "Proveedor": "string",
   "Penalizacion_sla": "string o null",
-  "notas": "string con observaciones adicionales relevantes o null"
+  "notas": "string con la descripción del servicio y elementos adicionales o null"
 }
 
 INSTRUCCIONES IMPORTANTES:
@@ -383,6 +409,9 @@ Para "fecha_inicio" y "fecha_fin":
 Para "Penalizacion_sla":
 - Busca montos, porcentajes o descripciones de penalizaciones por incumplimiento
 - Ejemplo: "10% del valor mensual del servicio"
+
+Para ="tipo_de_SLA":
+- Busca si el contrato menciona algún tipo específico de SLA (ejemplo: "SLA de disponibilidad", "SLA de soporte", "SLA de rendimiento") y extrae esa información como "tipo_de_SLA". Si no se menciona un tipo específico, puedes dejarlo como null o "general".
 
 Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.
 
@@ -417,8 +446,9 @@ ${text}`;
 }
 
 // Parse and clean Gemini JSON response
-function parseGeminiResponse(responseText) {
+function parseAIResponse(responseText) {
   let cleaned = responseText
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/gi, '')
     .trim();
@@ -533,7 +563,8 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
     // Step 4: Parsear respuesta de IA
     let geminiData;
     try {
-      geminiData = parseGeminiResponse(aiResult.text);
+      //geminiData = parseGeminiResponse(aiResult.text);
+      geminiData = parseAIResponse(aiResult.text);
     } catch (parseErr) {
       console.error('❌ Error al parsear respuesta de IA:', aiResult.text);
       return res.status(500).json({ error: 'Error al procesar la respuesta de IA. Intenta de nuevo.' });
