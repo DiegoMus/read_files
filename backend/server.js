@@ -255,6 +255,89 @@ async function extractTextWithVision(buffer, filename) {
   }
 }
 
+// ─── Analyze text with Ollama (local model — 100% privado) ───────────────────
+async function analyzeWithOllama(text) {
+  const model = process.env.LOCAL_MODEL || 'deepseek-r1:32b';
+  console.log(`🤖 Enviando texto a Ollama (${model}) — modo local...`);
+
+  const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura:
+{
+  "fecha_inicio": "YYYY-MM-DD o null",
+  "fecha_fin": "YYYY-MM-DD o null",
+  "SLA": {
+    "tipo_de_SLA": "string",
+    "descripcion": "string"
+  },
+  "TerminacionAnticipada": true/false,
+  "Contratante": "string",
+  "Proveedor": "string",
+  "Penalizacion_sla": "string o null",
+  "notas": "string con observaciones adicionales relevantes o null"
+}
+
+INSTRUCCIONES IMPORTANTES:
+
+Para "TerminacionAnticipada" debes buscar si el contrato menciona alguna de estas variantes:
+- "terminación del contrato"
+- "rescisión del contrato"
+- "rescisión anticipada"
+- "dar por terminado antes"
+- "terminar anticipadamente"
+- "derecho a rescindir"
+- "cualquiera de las partes podrá dar por terminado"
+- "podrá terminar el contrato"
+- "finalización anticipada"
+Si encuentra CUALQUIERA de estas frases → TerminacionAnticipada: true
+Si NO encuentra ninguna mención → TerminacionAnticipada: false
+
+Para "fecha_inicio" y "fecha_fin":
+- Busca frases como "vigencia", "plazo", "duración", "a partir del", "hasta el"
+- Convierte fechas escritas en texto a formato YYYY-MM-DD
+- Ejemplo: "primero de enero de dos mil veinticuatro" → "2024-01-01"
+
+Para "Penalizacion_sla":
+- Busca montos, porcentajes o descripciones de penalizaciones por incumplimiento
+
+Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.
+
+Texto del contrato:
+${text}`;
+
+  const response = await fetch(process.env.OLLAMA_API_URL || 'http://localhost:11434/api/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      prompt,
+      stream: false,
+      format: 'json',
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Ollama error (${response.status}): ${err}`);
+  }
+
+  const data = await response.json();
+  console.log(`✅ Respuesta de Ollama recibida`);
+  console.log(`📊 Tokens — Input: ${data.prompt_eval_count} | Output: ${data.eval_count}`);
+  console.log(`⏱️  Tiempo: ${(data.total_duration / 1e9).toFixed(1)} segundos`);
+  console.log(`💰 Costo: $0.00 USD (modelo local)`);
+
+  return {
+    text: data.response,
+    tokens: {
+      input: data.prompt_eval_count || 0,
+      output: data.eval_count || 0,
+      total: (data.prompt_eval_count || 0) + (data.eval_count || 0),
+      costo_usd: 0,
+      modelo: model,
+      modo: 'local',
+    },
+  };
+}
+
 // ─── Analyze text with Gemini 2.5 Flash ───────────────────────────────────────
 async function analyzeWithGemini(text) {
   if (!genAI) throw new Error('GEMINI_API_KEY no está configurada');
@@ -327,6 +410,8 @@ ${text}`;
       output: outputTokens,
       total: totalTokens,
       costo_usd: parseFloat(costUSD),
+      modelo: 'gemini-2.5-flash',
+      modo: 'cloud',
     },
   };
 }
@@ -358,6 +443,7 @@ app.get('/api/health', generalLimiter, async (req, res) => {
     gemini: process.env.GEMINI_API_KEY ? 'configured' : 'not configured',
     vision: process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'configured' : 'not configured',
     gcs: process.env.GCS_BUCKET_NAME ? `configured (${process.env.GCS_BUCKET_NAME})` : 'not configured (modo inline, máx 5 páginas)',
+    ai_mode: process.env.AI_MODE === 'local' ? `local (${process.env.LOCAL_MODEL || 'deepseek-r1:32b'})` : 'cloud (gemini-2.5-flash)',
   });
 });
 
@@ -434,16 +520,23 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       }
     }
 
-    // Step 3: Analizar con Gemini
-    const geminiResult = await analyzeWithGemini(extractedText);
+    // Step 3: Analizar con IA (local u cloud según AI_MODE)
+    const aiMode = process.env.AI_MODE || 'cloud';
+    if (aiMode !== 'local' && aiMode !== 'cloud') {
+      return res.status(500).json({ error: `AI_MODE inválido: "${aiMode}". Usa "local" o "cloud".` });
+    }
+    console.log(`🧠 Modo IA: ${aiMode.toUpperCase()}`);
+    const aiResult = aiMode === 'local'
+      ? await analyzeWithOllama(extractedText)
+      : await analyzeWithGemini(extractedText);
 
-    // Step 4: Parsear respuesta de Gemini
+    // Step 4: Parsear respuesta de IA
     let geminiData;
     try {
-      geminiData = parseGeminiResponse(geminiResult.text);
+      geminiData = parseGeminiResponse(aiResult.text);
     } catch (parseErr) {
-      console.error('❌ Error al parsear respuesta de Gemini:', geminiResult.text);
-      return res.status(500).json({ error: 'Error al procesar la respuesta de Gemini. Intenta de nuevo.' });
+      console.error('❌ Error al parsear respuesta de IA:', aiResult.text);
+      return res.status(500).json({ error: 'Error al procesar la respuesta de IA. Intenta de nuevo.' });
     }
 
     // Step 5: Normalizar fechas
@@ -470,7 +563,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
         geminiData.TerminacionAnticipada === true,
         geminiData.notas || null,
         tipoDocumento,
-        JSON.stringify(geminiResult.tokens),
+        JSON.stringify(aiResult.tokens),
         visionData ? JSON.stringify(visionData) : null,
       ]
     );
@@ -483,7 +576,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       success: true,
       tipo_documento: tipoDocumento,
       consumo: {
-        tokens: geminiResult.tokens,
+        tokens: aiResult.tokens,
         vision: visionData,
       },
       data: {
@@ -528,6 +621,8 @@ async function start() {
     console.log(`📊 Gemini:  ${process.env.GEMINI_API_KEY ? '✅ configurado' : '❌ no configurado'}`);
     console.log(`👁️  Vision:  ${process.env.GOOGLE_APPLICATION_CREDENTIALS ? '✅ configurado' : '❌ no configurado'}`);
     console.log(`☁️  GCS:     ${process.env.GCS_BUCKET_NAME ? `✅ bucket: ${process.env.GCS_BUCKET_NAME}` : '⚠️  no configurado (modo inline, máx 5 páginas)'}`);
+    console.log(`🧠 Modo IA: ${process.env.AI_MODE === 'local' ? '✅ LOCAL (Ollama)' : '☁️  CLOUD (Gemini)'}`);
+    console.log(`🤖 Modelo:  ${process.env.AI_MODE === 'local' ? (process.env.LOCAL_MODEL || 'deepseek-r1:32b') : 'gemini-2.5-flash'}`);
   });
 }
 
