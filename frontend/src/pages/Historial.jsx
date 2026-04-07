@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import axios from 'axios'
+import { FcDocument } from "react-icons/fc";
+import { GiCheckMark, GiNightVision, GiCancel, GiCyberEye , GiBookmarklet } from "react-icons/gi";
+import { MdPictureAsPdf } from "react-icons/md";
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -37,14 +40,15 @@ export default function Historial() {
     <main className="max-w-7xl mx-auto px-4 py-10">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-3xl font-bold text-gray-800">Historial de Contratos</h1>
+          <h1 className="text-2xl font-bold text-gray-800"> <GiBookmarklet  className="inline-block mr-1" /> Historial de Contratos</h1>
+          
           <p className="text-gray-500 mt-1">Todos los contratos procesados</p>
         </div>
         <Link
           to="/"
           className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
         >
-          + Cargar Contrato
+          <MdPictureAsPdf className="inline-block mr-2" /> Cargar Contrato
         </Link>
       </div>
 
@@ -101,17 +105,17 @@ export default function Historial() {
                     <td className="px-4 py-3 text-gray-600">{formatDate(c.fin)}</td>
                     <td className="px-4 py-3 text-gray-600">{c.tipo_sla || '—'}</td>
                     <td className="px-4 py-3 text-center">
-                      {c.terminacion_anticipada ? '✅' : '❌'}
+                      {c.terminacion_anticipada ? <GiCheckMark className="inline-block text-green-500" /> : <GiCancel className="inline-block text-red-500" />}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <span
                         className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${
                           c.tipo_documento === 'digital'
                             ? 'bg-green-100 text-green-700'
-                            : 'bg-yellow-100 text-yellow-700'
+                            : 'bg-blue-100 text-blue-700'
                         }`}
                       >
-                        {c.tipo_documento === 'digital' ? '🟢 Digital' : '🟡 OCR'}
+                        {c.tipo_documento === 'digital' ? <GiCheckMark className="inline-block text-green-500" /> : <GiCyberEye  className="inline-block text-blue-500"/>}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-gray-500">
