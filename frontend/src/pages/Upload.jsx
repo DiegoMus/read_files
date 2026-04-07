@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import axios from 'axios'
+import {GiBattleMech, GiCheckMark, GiNightVision, GiCancel, GiCyberEye , GiBookmarklet } from "react-icons/gi";
+import { FaUpload, FaFileContract } from "react-icons/fa6";
+import { FcOk } from "react-icons/fc";
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -31,7 +34,7 @@ export default function Upload() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: { 'application/pdf': ['.pdf'] },
-    maxSize: 10 * 1024 * 1024,
+    maxSize: 20 * 1024 * 1024,
     multiple: false,
   })
 
@@ -83,7 +86,8 @@ export default function Upload() {
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-10">
-      <h1 className="text-3xl font-bold text-gray-800 mb-2">Cargar Contrato</h1>
+      <h1 className="text-2xl font-bold text-gray-800"> <FaFileContract className="inline-block mr-1" /> Cargar Contrato</h1>
+      
       <p className="text-gray-500 mb-8">
         Sube un contrato en PDF para extraer su información de forma inteligente.
       </p>
@@ -123,7 +127,7 @@ export default function Upload() {
               <input {...getInputProps()} />
               {file ? (
                 <div className="text-green-700">
-                  <p className="text-2xl mb-1">✅</p>
+                  <p className="text-2xl mb-1"><FcOk /></p>
                   <p className="font-medium">{file.name}</p>
                   <p className="text-sm text-gray-500 mt-1">
                     {(file.size / 1024 / 1024).toFixed(2)} MB
@@ -133,7 +137,7 @@ export default function Upload() {
                 <p className="text-blue-600 font-medium">Suelta el PDF aquí...</p>
               ) : (
                 <div className="text-gray-500">
-                  <p className="text-3xl mb-2">📁</p>
+                  <p className="text-3xl mb-2"><FaUpload /></p>
                   <p className="font-medium">Arrastra un PDF aquí, o haz clic para seleccionar</p>
                   <p className="text-sm mt-1">Solo archivos .pdf • Máximo 10MB</p>
                 </div>
@@ -163,7 +167,10 @@ export default function Upload() {
                 {LOADING_MESSAGES[loadingMsg]}
               </span>
             ) : (
-              'Analizar Contrato'
+              <span className="flex items-center justify-center gap-2">
+                <GiBattleMech />
+                Analizar Contrato
+              </span>
             )}
           </button>
         </form>
@@ -171,7 +178,7 @@ export default function Upload() {
         /* Result card */
         <div className="bg-white shadow rounded-xl p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-xl font-bold text-gray-800">✅ Contrato Analizado</h2>
+            <h2 className="text-xl font-bold text-gray-800"><GiBookmarklet className="inline-block mr-1" /> Contrato Analizado</h2>
             <span
               className={`px-3 py-1 rounded-full text-xs font-semibold ${
                 result.tipo_documento === 'digital'
@@ -179,7 +186,9 @@ export default function Upload() {
                   : 'bg-yellow-100 text-yellow-700'
               }`}
             >
-              {result.tipo_documento === 'digital' ? '🟢 Digital' : '🟡 OCR'}
+              
+              {result.tipo_documento === 'digital' ? <GiCheckMark className="inline-block text-green-500" /> : <GiCyberEye  className="inline-block text-blue-500"/>}
+              
             </span>
           </div>
 
@@ -192,7 +201,7 @@ export default function Upload() {
             <Field label="Penalización SLA" value={result.data?.Penalizacion_sla} />
             <Field
               label="Terminación Anticipada"
-              value={result.data?.TerminacionAnticipada ? '✅ Sí' : '❌ No'}
+              value={result.data?.TerminacionAnticipada ? <GiCheckMark className="inline-block text-green-500" /> : <GiCancel className="inline-block text-red-500" />}
             />
           </div>
 

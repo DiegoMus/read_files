@@ -644,6 +644,123 @@ app.use((err, req, res, next) => {
   next();
 });
 
+// Dashboard stats
+// Dashboard stats
+app.get('/api/stats', generalLimiter, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COUNT(*)::int                                                                      AS total_contratos,
+        COUNT(*) FILTER (WHERE tipo_documento = 'ocr')::int                               AS total_ocr,
+        COUNT(*) FILTER (WHERE tipo_documento = 'digital')::int                           AS total_digital,
+        COALESCE(SUM((tokens::jsonb->>'total')::numeric), 0)                              AS total_tokens,
+        COALESCE(SUM((tokens::jsonb->>'input')::numeric), 0)                              AS total_tokens_input,
+        COALESCE(SUM((tokens::jsonb->>'output')::numeric), 0)                             AS total_tokens_output,
+        COALESCE(SUM((tokens::jsonb->>'costo_usd')::numeric), 0)                          AS total_costo_usd,
+        COALESCE(SUM((vision_pages::jsonb->>'paginas')::numeric), 0)                      AS total_vision_pages,
+        COALESCE(SUM((vision_pages::jsonb->>'costo_usd')::numeric), 0)                    AS total_vision_costo_usd,
+        COALESCE(AVG((tokens::jsonb->>'total')::numeric), 0)                              AS avg_tokens_por_contrato,
+        COALESCE(AVG((tokens::jsonb->>'costo_usd')::numeric), 0)                          AS avg_costo_por_contrato,
+        COALESCE(AVG((vision_pages::jsonb->>'paginas')::numeric), 0)                      AS avg_paginas_por_contrato,
+        MIN(created_at)                                                                    AS primer_contrato,
+        MAX(created_at)                                                                    AS ultimo_contrato
+      FROM registros
+      WHERE estado = 'completado'
+    `);
+
+    const porDia = await pool.query(`
+      SELECT
+        TO_CHAR(DATE(created_at), 'YYYY-MM-DD')                                                                    AS dia,
+        COUNT(*)::int                                                                      AS contratos,
+        COALESCE(SUM((tokens::jsonb->>'total')::numeric), 0)                              AS tokens,
+        COALESCE(SUM((tokens::jsonb->>'costo_usd')::numeric), 0)                          AS costo_usd,
+        COALESCE(SUM((vision_pages::jsonb->>'costo_usd')::numeric), 0)                    AS vision_costo_usd
+      FROM registros
+      WHERE estado = 'completado'
+      GROUP BY DATE(created_at)
+      ORDER BY dia DESC
+      LIMIT 30
+    `);
+
+    const porModelo = await pool.query(`
+      SELECT
+        tokens::jsonb->>'modelo'                                                           AS modelo,
+        tokens::jsonb->>'modo'                                                             AS modo,
+        COUNT(*)::int                                                                      AS contratos,
+        COALESCE(SUM((tokens::jsonb->>'total')::numeric), 0)                              AS tokens_total,
+        COALESCE(SUM((tokens::jsonb->>'costo_usd')::numeric), 0)                          AS costo_usd
+      FROM registros
+      WHERE estado = 'completado' AND tokens IS NOT NULL
+      GROUP BY tokens::jsonb->>'modelo', tokens::jsonb->>'modo'
+    `);
+
+    const stats = result.rows[0];
+    const diasActivo = porDia.rows.length || 1;
+    const promedioContratosPerDia = parseFloat((stats.total_contratos / diasActivo).toFixed(2));
+    const avgPaginasPorContrato   = parseFloat(stats.avg_paginas_por_contrato) || 0;
+
+    // Proyección de páginas OCR en 30 días
+    const proyMensualContratos  = Math.round(promedioContratosPerDia * 30);
+    const proyMensualTokens     = Math.round(parseFloat(stats.avg_tokens_por_contrato) * promedioContratosPerDia * 30);
+    const proyMensualPaginas    = Math.round(avgPaginasPorContrato * proyMensualContratos);
+
+    // Costo IA proyectado
+    const proyMensualCostoIA    = parseFloat((parseFloat(stats.avg_costo_por_contrato) * proyMensualContratos).toFixed(4));
+
+    // Costo Vision con tier gratuito (1000 páginas/mes gratis)
+    const VISION_FREE           = 1000;
+    const VISION_PRICE          = 0.0015; // USD por página
+    const paginasPagas          = Math.max(0, proyMensualPaginas - VISION_FREE);
+    const proyMensualCostoVision = parseFloat((paginasPagas * VISION_PRICE).toFixed(4));
+
+    // Costo total proyectado
+    const proyMensualCostoTotal  = parseFloat((proyMensualCostoIA + proyMensualCostoVision).toFixed(4));
+
+    // Cuántos contratos agotan el free tier
+    const contratosHastaFreeTier = avgPaginasPorContrato > 0
+      ? Math.floor(VISION_FREE / avgPaginasPorContrato)
+      : null;
+
+
+    res.json({
+      resumen: {
+        total_contratos: stats.total_contratos,
+        total_ocr: stats.total_ocr,
+        total_digital: stats.total_digital,
+        total_tokens: parseFloat(stats.total_tokens),
+        total_tokens_input: parseFloat(stats.total_tokens_input),
+        total_tokens_output: parseFloat(stats.total_tokens_output),
+        total_costo_usd: parseFloat(stats.total_costo_usd).toFixed(6),
+        total_vision_pages: parseFloat(stats.total_vision_pages),
+        total_vision_costo_usd: parseFloat(stats.total_vision_costo_usd).toFixed(6),
+        avg_tokens_por_contrato: Math.round(stats.avg_tokens_por_contrato),
+        avg_costo_por_contrato: parseFloat(stats.avg_costo_por_contrato).toFixed(6),
+        avg_paginas_por_contrato: Math.round(stats.avg_paginas_por_contrato),
+        primer_contrato: stats.primer_contrato,
+        ultimo_contrato: stats.ultimo_contrato,
+      },
+      proyeccion: {
+        promedio_contratos_dia:          promedioContratosPerDia,
+        proyeccion_mensual_contratos:    proyMensualContratos,
+        proyeccion_mensual_tokens:       proyMensualTokens,
+        proyeccion_mensual_paginas_ocr:  proyMensualPaginas,
+        proyeccion_mensual_costo_ia:     proyMensualCostoIA.toFixed(4),
+        proyeccion_mensual_costo_vision: proyMensualCostoVision.toFixed(4),
+        proyeccion_mensual_costo_total:  proyMensualCostoTotal.toFixed(4),
+        vision_free_tier_paginas:        VISION_FREE,
+        vision_paginas_pagas:            paginasPagas,
+        contratos_hasta_free_tier:       contratosHastaFreeTier,
+        supera_free_tier:                proyMensualPaginas > VISION_FREE,
+      },
+      por_dia: porDia.rows,
+      por_modelo: porModelo.rows,
+    });
+  } catch (err) {
+    console.error('❌ Error al obtener stats:', err.message);
+    res.status(500).json({ error: 'Error al obtener estadísticas' });
+  }
+});
+
 // Start server
 async function start() {
   await initDatabase();
