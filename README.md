@@ -25,10 +25,12 @@ PDF entra
 
 ## Prerrequisitos
 
-- **Node.js 18+** (recomendado 20+)
-- **PostgreSQL** corriendo localmente o accesible via URL
-- **Cuenta en Google AI Studio** para obtener el API key de Gemini
-- *(Opcional)* **Cuenta en Google Cloud** con Vision API habilitada para OCR de PDFs escaneados
+- **Node.js v24.13.0** (recomendado 20+)
+- **PostgreSQL** 
+- **Cuenta en Google AI Studio** 
+- **Cuenta en Google Cloud** 
+- **Ollama**
+- **Modelo de LLM**
 
 ---
 
@@ -36,23 +38,23 @@ PDF entra
 
 ```
 read_files/
-├── backend/          ← Node.js + Express
-│   ├── server.js
-│   ├── package.json
-│   └── .env.example
-├── frontend/         ← React + Vite + Tailwind CSS
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── Upload.jsx
-│   │   │   └── Historial.jsx
-│   │   ├── components/
-│   │   │   └── Navbar.jsx
-│   │   ├── App.jsx
-│   │   └── main.jsx
-│   ├── package.json
-│   └── .env.example
-├── .env.example
-└── README.md
+    credentials/
+    backend/          
+        server.js
+        package.json
+        .env.example
+    frontend/         
+       src/
+          pages/
+               Upload.jsx
+               Historial.jsx
+          components/
+               Navbar.jsx
+               App.jsx
+         main.jsx
+         package.json
+   .env.example
+   README.md
 ```
 
 ---
@@ -79,6 +81,10 @@ PORT=3001
 DATABASE_URL=postgresql://postgres:tu_password@localhost:5432/postgres
 GEMINI_API_KEY=tu_api_key_de_gemini
 GOOGLE_VISION_API_KEY=tu_api_key_de_google_vision  # opcional
+GCS_BUCKET_NAME=
+AI_MODE= #local/cloud
+LOCAL_MODEL=
+
 ```
 
 Inicia el servidor:
@@ -88,8 +94,6 @@ npm start
 # o en modo desarrollo con auto-reload:
 npm run dev
 ```
-
-El backend crea la tabla `registros` automáticamente si no existe.
 
 ### 2. Frontend
 
@@ -104,7 +108,7 @@ Crea el archivo `.env` basándote en `.env.example`:
 cp .env.example .env
 ```
 
-Edita si tu backend corre en un puerto diferente:
+Edita si tu backend corre en un puerto diferente o en una URL:
 
 ```env
 VITE_API_URL=http://localhost:3001
@@ -123,18 +127,8 @@ Abre http://localhost:5173 en tu navegador.
 ## Configuración de API Keys
 
 ### Gemini API Key (obligatorio)
-
-1. Ve a [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Crea un nuevo API key
-3. Cópialo en `backend/.env` como `GEMINI_API_KEY`
-
-### Google Cloud Vision API Key (opcional — para PDFs escaneados)
-
-1. Ve a [Google Cloud Console](https://console.cloud.google.com/)
-2. Crea o selecciona un proyecto
-3. Habilita la **Cloud Vision API**
-4. Ve a "Credenciales" → "Crear credenciales" → "Clave de API"
-5. Cópiala en `backend/.env` como `GOOGLE_VISION_API_KEY`
+### Google Cloud Vision API Key 
+### Google Cloud Store
 
 > **Sin esta clave**, los PDFs escaneados (imágenes) serán rechazados con un mensaje claro al usuario.
 
@@ -146,8 +140,8 @@ El sistema evita enviar el binario del PDF a Gemini (que sería costoso). En su 
 
 | Tipo de PDF | Proceso | Costo tokens |
 |-------------|---------|--------------|
-| PDF digital | `pdf-parse` extrae texto gratis → solo texto a Gemini | 🟢 Bajo |
-| PDF escaneado | Vision OCR → texto → solo texto a Gemini | 🟡 Medio |
+| PDF digital | `pdf-parse` extrae texto gratis → solo texto a Gemini |  Bajo |
+| PDF escaneado | Vision OCR → texto → solo texto a Gemini |  Medio |
 | PDF escaneado sin Vision | Rechazado ❌ | — |
 
 ---
@@ -171,6 +165,8 @@ El sistema evita enviar el binario del PDF a Gemini (que sería costoso). En su 
 | `GET` | `/api/health` | Estado del servidor, DB y APIs |
 | `GET` | `/api/contracts` | Lista todos los contratos |
 | `POST` | `/api/contracts/upload` | Sube y analiza un PDF |
+| `GET` | `/api/stats` | captura y calcula datos de proyección |
+
 
 ---
 
@@ -193,6 +189,8 @@ CREATE TABLE IF NOT EXISTS registros (
   notas                  TEXT,
   tipo_documento         TEXT,
   estado                 TEXT DEFAULT 'pendiente',
+  tokens				       TEXT, 
+  vision_pages		       TEXT,
   created_at             TIMESTAMP DEFAULT NOW()
 );
 ```
