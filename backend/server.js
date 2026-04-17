@@ -8,6 +8,8 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const rateLimit = require('express-rate-limit');
 const vision = require('@google-cloud/vision');
 const { Storage } = require('@google-cloud/storage');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -256,107 +258,83 @@ async function extractTextWithVision(buffer, filename) {
 }
 
 // ─── Analyze text with Ollama (local model — 100% privado) ───────────────────
+// ─── Analyze text with llama-server (local model — 100% privado) ──────────────
 async function analyzeWithOllama(text) {
-  const model = process.env.LOCAL_MODEL || 'deepseek-r1:32b';
-  console.log(`🤖 Enviando texto a Ollama (${model}) — modo local...`);
-    // Truncar texto si es muy largo para el modelo local
-  const maxChars = 50000;
-  if (text.length > maxChars) {
-    console.log(`⚠️  Texto truncado de ${text.length} a ${maxChars} caracteres para modelo local`);
-    text = text.slice(0, maxChars);
-  }
+  const model = process.env.LOCAL_MODEL || 'contract-reader:v1';
+  console.log(`🤖 Enviando texto a llama-server (${model}) — modo local...`);
 
-  const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura:
+  const CTX_SIZE = 65536;
+  const RESERVED_TOKENS = 2048;
+  const MAX_TOKENS = CTX_SIZE - RESERVED_TOKENS;
+  const maxChars = MAX_TOKENS * 3;
+
+  const truncated = text.length > maxChars ? text.slice(0, maxChars) : text;
+  if (text.length > maxChars) {
+    console.log(`⚠️  Texto truncado de ${text.length} a ${truncated.length} caracteres`);
+  }
+  console.log(`📝 Texto final: ${truncated.length} chars (máx permitido: ${maxChars})`);
+
+  const systemPrompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el texto y extrae la información en formato JSON con exactamente esta estructura:
 {
   "fecha_inicio": "YYYY-MM-DD o null",
   "fecha_fin": "YYYY-MM-DD o null",
-  "SLA": {
-    "tipo_de_SLA": "string",
-    "descripcion": "string"
-  },
+  "SLA": { "tipo_de_SLA": "string", "descripcion": "string" },
   "TerminacionAnticipada": true/false,
   "Contratante": "string",
   "Proveedor": "string",
   "Penalizacion_sla": "string o null",
-  "notas": "string con la descripción del servicio y elementos adicionales o null"
+  "notas": "string o null"
 }
+Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.`;
 
-INSTRUCCIONES IMPORTANTES:
-
-Para "TerminacionAnticipada" debes buscar si el contrato menciona alguna de estas variantes:
-- "terminación del contrato"
-- "rescisión del contrato"
-- "rescisión anticipada"
-- "dar por terminado antes"
-- "terminar anticipadamente"
-- "derecho a rescindir"
-- "cualquiera de las partes podrá dar por terminado"
-- "podrá terminar el contrato"
-- "finalización anticipada"
-Si encuentra CUALQUIERA de estas frases → TerminacionAnticipada: true
-Si NO encuentra ninguna mención → TerminacionAnticipada: false
-
-Para "fecha_inicio" y "fecha_fin":
-- Busca frases como "vigencia", "plazo", "duración", "a partir del", "hasta el"
-- Convierte fechas escritas en texto a formato YYYY-MM-DD
-- Ejemplo: "primero de enero de dos mil veinticuatro" → "2024-01-01"
-
-Para "Penalizacion_sla":
-- Busca montos, porcentajes o descripciones de penalizaciones por incumplimiento
-
-Para ="tipo_de_SLA":
-- Busca si el contrato menciona algún tipo específico de SLA (ejemplo: "SLA de disponibilidad", "SLA de soporte", "SLA de rendimiento") y extrae esa información como "tipo_de_SLA". Si no se menciona un tipo específico, puedes dejarlo como null o "general".
-
-Responde ÚNICAMENTE con el JSON, sin explicaciones adicionales.
-
-Texto del contrato:
-${text}`;
-
-  const response = await fetch(process.env.OLLAMA_API_URL || 'http://localhost:11434/api/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      prompt,
-      stream: false,
-      //format: 'json',
-      options: {
-        num_ctx: 32768,
+  const response = await fetch(
+    process.env.LLAMA_API_URL || 'http://localhost:8080/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Texto del contrato:\n${truncated}` },
+        ],
         temperature: 0.1,
-        think: false,
-      },
-    }),
-  });
+        max_tokens: 2048,
+        n_predict: 2048,
+        n_ctx: 65536,
+      }),
+    }
+  );
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Ollama error (${response.status}): ${err}`);
+    throw new Error(`llama-server error (${response.status}): ${err}`);
   }
 
   const data = await response.json();
-  console.log(`✅ Respuesta de Ollama recibida`);
-  console.log(`📊 Tokens — Input: ${data.prompt_eval_count} | Output: ${data.eval_count}`);
-  console.log(`⏱️  Tiempo: ${(data.total_duration / 1e9).toFixed(1)} segundos`);
-  console.log(`💰 Costo: $0.00 USD (modelo local)`);
-  console.log(`📋 Respuesta raw: ${data.response?.slice(0, 200)}`);
+  const rawText = (data.choices[0].message.content || '')
+    .replace(/<\|im_end\|>/g, '')
+    .replace(/<\|im_start\|>/g, '')
+    .trim();
 
-  // Limpiar thinking de Qwen3 y markdown
-  const responseClean = (data.response || '')
+  console.log(`✅ Respuesta de llama-server recibida`);
+  console.log(`📊 Tokens — Input: ${data.usage?.prompt_tokens} | Output: ${data.usage?.completion_tokens}`);
+  console.log(`💰 Costo: $0.00 USD (modelo local)`);
+  console.log(`📋 Respuesta raw: ${rawText.slice(0, 300)}`);
+
+  const responseClean = rawText
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/gi, '')
     .trim();
 
-  console.log(`📋 Respuesta limpia: ${responseClean.slice(0, 200)}`);
+  console.log(`📋 Respuesta limpia: ${responseClean.slice(0, 300)}`);
 
   return {
     text: responseClean,
-
-
     tokens: {
-      input: data.prompt_eval_count || 0,
-      output: data.eval_count || 0,
-      total: (data.prompt_eval_count || 0) + (data.eval_count || 0),
+      input: data.usage?.prompt_tokens || 0,
+      output: data.usage?.completion_tokens || 0,
+      total: data.usage?.total_tokens || 0,
       costo_usd: 0,
       modelo: model,
       modo: 'local',
@@ -371,7 +349,7 @@ async function analyzeWithGemini(text) {
   console.log('🤖 Enviando texto a Gemini 2.5 Flash...');
   const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-  const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura:
+  const prompt = `Como un analista tecnológico legal especializado en contratos en español, analiza el siguiente texto y extrae la información en formato JSON con exactamente esta estructura y si Request for Proposal RFP considera entregables claros y si tiene estructura para clasificarse como CAPEX:
 {
   "fecha_inicio": "YYYY-MM-DD o null",
   "fecha_fin": "YYYY-MM-DD o null",
@@ -383,7 +361,7 @@ async function analyzeWithGemini(text) {
   "Contratante": "string",
   "Proveedor": "string",
   "Penalizacion_sla": "string o null",
-  "notas": "string con la descripción del servicio y elementos adicionales o null"
+  "notas": "Si el documento es un RFP, describir los entregables y estructura para determinar si es CAPEX o no. Si no es un RFP, colocar null."
 }
 
 INSTRUCCIONES IMPORTANTES:
@@ -445,6 +423,43 @@ ${text}`;
   };
 }
 
+// ─── Detectar si el documento es un contrato ──────────────────────────────────
+async function detectDocumentType(text) {
+  if (!genAI) throw new Error('GEMINI_API_KEY no está configurada');
+
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const sample = text.slice(0, 10000); // Solo primeras 10k chars para detección rápida
+
+  const prompt = `Analiza el siguiente texto y determina si es un CONTRATO LEGAL o no.
+
+Responde ÚNICAMENTE con este JSON:
+{
+  "es_contrato": true/false,
+  "tipo_documento": "string (ej: Factura, Carta, Propuesta, Manual, Reporte, etc.)",
+  "descripcion": "string con descripción breve de qué es el documento",
+  "datos_relevantes": {
+    "titulo": "string o null",
+    "fecha": "string o null",
+    "partes_involucradas": ["array de nombres si los hay"],
+    "monto": "string o null",
+    "proposito": "string breve del propósito del documento"
+  }
+}
+
+Texto:
+${sample}`;
+
+  const result = await model.generateContent(prompt);
+  const responseText = result.response.text();
+
+  const cleaned = responseText
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/gi, '')
+    .trim();
+
+  return JSON.parse(cleaned);
+}
+
 // Parse and clean Gemini JSON response
 function parseAIResponse(responseText) {
   let cleaned = responseText
@@ -490,6 +505,7 @@ app.get('/api/contracts', generalLimiter, async (req, res) => {
 });
 
 // Upload and analyze contract
+// Upload and analyze contract
 app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), async (req, res) => {
   try {
     const { requisicion } = req.body;
@@ -500,7 +516,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
 
     console.log(`\n📄 Procesando contrato: ${file.originalname} | Requisición: ${requisicion}`);
 
-    // Step 1: Intentar extraer texto con pdf-parse
+    // ── Step 1: Extraer texto con pdf-parse ──────────────────────────────────
     let extractedText = '';
     let tipoDocumento = 'digital';
     let visionData = null;
@@ -515,7 +531,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
       extractedText = '';
     }
 
-    // Step 2: Determinar si es digital o escaneado
+    // ── Step 2: Digital o escaneado ──────────────────────────────────────────
     if (extractedText.trim().length > 50) {
       console.log('✅ PDF digital detectado — usando texto extraído directamente');
       tipoDocumento = 'digital';
@@ -525,16 +541,18 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
 
       if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
         return res.status(422).json({
-          error: 'El documento parece ser una imagen escaneada. Por favor sube una versión digital del contrato, o configura Google Vision API para habilitar OCR.',
+          error: 'El documento parece ser una imagen escaneada. Configura Google Vision API para habilitar OCR.',
         });
       }
 
       const ocrResult = await extractTextWithVision(file.buffer, file.originalname);
       extractedText = ocrResult.text;
 
-      // Calcular costo de Vision API
       const visionPages = ocrResult.pages || 0;
-      const visionCostUSD = visionPages <= VISION_FREE_TIER_PAGES ? 0 : (visionPages * VISION_COST_PER_PAGE).toFixed(6);
+      const visionCostUSD = visionPages <= VISION_FREE_TIER_PAGES
+        ? 0
+        : (visionPages * VISION_COST_PER_PAGE).toFixed(6);
+
       visionData = {
         paginas: visionPages,
         costo_usd: parseFloat(visionCostUSD),
@@ -545,54 +563,90 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
 
       if (!extractedText || extractedText.trim().length < 10) {
         return res.status(422).json({
-          error: 'No se pudo extraer texto del documento escaneado. Por favor verifica que el PDF contenga texto legible.',
+          error: 'No se pudo extraer texto del documento escaneado. Verifica que el PDF contenga texto legible.',
         });
       }
     }
 
-    // Step 3: Analizar con IA (local u cloud según AI_MODE)
+    // ── Step 3: Detectar tipo de documento (siempre con Gemini) ─────────────
+    console.log('🔍 Detectando tipo de documento...');
+    let docDetection;
+    try {
+      docDetection = await detectDocumentType(extractedText);
+      console.log(`📄 Tipo detectado: ${docDetection.tipo_documento} | Es contrato: ${docDetection.es_contrato}`);
+    } catch (detErr) {
+      console.warn('⚠️  No se pudo detectar tipo de documento:', detErr.message);
+      docDetection = { es_contrato: true, tipo_documento: 'Contrato', descripcion: null, datos_relevantes: null };
+    }
+
+    // Si NO es contrato → responder sin guardar en DB
+    if (!docDetection.es_contrato) {
+      console.log(`⚠️  Documento no es un contrato: ${docDetection.tipo_documento}`);
+      return res.status(200).json({
+        success: false,
+        es_contrato: false,
+        tipo_documento: docDetection.tipo_documento,
+        descripcion: docDetection.descripcion,
+        datos_relevantes: docDetection.datos_relevantes,
+        mensaje: `El documento no parece ser un contrato. Se identificó como: ${docDetection.tipo_documento}.`,
+      });
+    }
+
+    // ── Step 4: Analizar con IA (local u cloud según AI_MODE) ────────────────
     const aiMode = process.env.AI_MODE || 'cloud';
     if (aiMode !== 'local' && aiMode !== 'cloud') {
       return res.status(500).json({ error: `AI_MODE inválido: "${aiMode}". Usa "local" o "cloud".` });
     }
     console.log(`🧠 Modo IA: ${aiMode.toUpperCase()}`);
-    const aiResult = aiMode === 'local'
-      ? await analyzeWithOllama(extractedText)
-      : await analyzeWithGemini(extractedText);
 
-    // Step 4: Parsear respuesta de IA
+    let aiResult;
+    if (aiMode === 'local') {
+      try {
+        aiResult = await analyzeWithOllama(extractedText);
+        JSON.parse(aiResult.text); // validar que sea JSON
+        console.log('✅ Modelo local respondió correctamente');
+      } catch (localErr) {
+        console.warn(`⚠️  Modelo local falló (${localErr.message}) → usando Gemini como fallback`);
+        aiResult = await analyzeWithGemini(extractedText);
+        await saveTrainingExample(extractedText, aiResult.text);
+      }
+    } else {
+      aiResult = await analyzeWithGemini(extractedText);
+      await saveTrainingExample(extractedText, aiResult.text);
+    }
+
+    // ── Step 5: Parsear respuesta de IA ──────────────────────────────────────
     let geminiData;
     try {
-      //geminiData = parseGeminiResponse(aiResult.text);
       geminiData = parseAIResponse(aiResult.text);
     } catch (parseErr) {
       console.error('❌ Error al parsear respuesta de IA:', aiResult.text);
       return res.status(500).json({ error: 'Error al procesar la respuesta de IA. Intenta de nuevo.' });
     }
 
-    // Step 5: Normalizar fechas
+    // ── Step 6: Normalizar fechas ─────────────────────────────────────────────
     const fechaInicio = normalizeDate(geminiData.fecha_inicio);
-    const fechaFin = normalizeDate(geminiData.fecha_fin);
+    const fechaFin    = normalizeDate(geminiData.fecha_fin);
 
-    // Step 6: Guardar en PostgreSQL con tokens y vision_pages
+    // ── Step 7: Guardar en PostgreSQL ─────────────────────────────────────────
     console.log('💾 Guardando en PostgreSQL...');
     const insertResult = await pool.query(
       `INSERT INTO registros
         (requisicion, proveedor, contratante, inicio, fin, tipo_sla, descripcion_sla,
          penalizacion, terminacion_anticipada, notas, tipo_documento, estado, tokens, vision_pages)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'completado', $12, $13)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completado',$12,$13)
        RETURNING *`,
       [
         requisicion,
-        geminiData.Proveedor || null,
-        geminiData.Contratante || null,
+        geminiData.Proveedor              || null,
+        geminiData.Contratante            || null,
         fechaInicio,
         fechaFin,
-        geminiData.SLA?.tipo_de_SLA || null,
-        geminiData.SLA?.descripcion || null,
-        geminiData.Penalizacion_sla || null,
+        geminiData.SLA?.tipo_de_SLA       || null,
+        geminiData.SLA?.descripcion       || null,
+        geminiData.Penalizacion_sla       || null,
         geminiData.TerminacionAnticipada === true,
-        geminiData.notas || null,
+        geminiData.notas                  || null,
         tipoDocumento,
         JSON.stringify(aiResult.tokens),
         visionData ? JSON.stringify(visionData) : null,
@@ -602,10 +656,14 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
     const savedRecord = insertResult.rows[0];
     console.log(`✅ Contrato guardado con ID: ${savedRecord.id}`);
 
-    // Step 7: Retornar resultado
+    // ── Step 8: Retornar resultado ────────────────────────────────────────────
     res.json({
       success: true,
-      tipo_documento: tipoDocumento,
+      es_contrato: true,
+      tipo_documento: tipoDocumento,                          // digital / ocr
+      tipo_documento_detectado: docDetection.tipo_documento, // ej: "Contrato de Servicios"
+      descripcion_documento: docDetection.descripcion,
+      datos_relevantes: docDetection.datos_relevantes,
       consumo: {
         tokens: aiResult.tokens,
         vision: visionData,
@@ -626,6 +684,7 @@ app.post('/api/contracts/upload', uploadLimiter, upload.single('contrato'), asyn
         notas: savedRecord.notas,
       },
     });
+
   } catch (err) {
     console.error('❌ Error general en upload:', err.message);
     res.status(500).json({ error: err.message || 'Error interno del servidor' });

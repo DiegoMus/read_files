@@ -1,6 +1,5 @@
 # Contract Reader 📄
-
-Aplicación web fullstack para leer contratos PDF de forma inteligente usando **Gemini 2.5 Flash** y **Google Cloud Vision OCR**.
+ **Gemini 2.5 Flash** y **Google Cloud Vision OCR**.
 
 ---
 
