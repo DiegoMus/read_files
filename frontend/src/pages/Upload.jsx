@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import axios from 'axios'
-import {GiBattleMech, GiCheckMark, GiNightVision, GiCancel, GiCyberEye , GiBookmarklet } from "react-icons/gi";
+import { GiBattleMech, GiCheckMark, GiNightVision, GiCancel, GiCyberEye, GiBookmarklet } from "react-icons/gi";
 import { FaUpload, FaFileContract } from "react-icons/fa6";
 import { FcOk } from "react-icons/fc";
 
@@ -9,7 +9,8 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
 const LOADING_MESSAGES = [
   'Extrayendo texto del PDF...',
-  'Analizando contenido con Gemini...',
+  'Detectando tipo de documento...',
+  'Analizando contenido con IA...',
   'Guardando en base de datos...',
 ]
 
@@ -34,7 +35,7 @@ export default function Upload() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: { 'application/pdf': ['.pdf'] },
-    maxSize: 20 * 1024 * 1024,
+    maxSize: 50 * 1024 * 1024,
     multiple: false,
   })
 
@@ -47,7 +48,6 @@ export default function Upload() {
     setError(null)
     setResult(null)
 
-    // Cycle through loading messages
     let msgIndex = 0
     const msgInterval = setInterval(() => {
       msgIndex = (msgIndex + 1) % LOADING_MESSAGES.length
@@ -86,14 +86,17 @@ export default function Upload() {
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-10">
-      <h1 className="text-2xl font-bold text-gray-800"> <FaFileContract className="inline-block mr-1" /> Cargar Contrato</h1>
-      
+      <h1 className="text-2xl font-bold text-gray-800">
+        <FaFileContract className="inline-block mr-1" /> Cargar Contrato
+      </h1>
       <p className="text-gray-500 mb-8">
         Sube un contrato en PDF para extraer su información de forma inteligente.
       </p>
 
       {!result ? (
+        /* ── Formulario ── */
         <form onSubmit={handleSubmit} className="bg-white shadow rounded-xl p-6 space-y-6">
+
           {/* Requisición */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -139,7 +142,7 @@ export default function Upload() {
                 <div className="text-gray-500">
                   <p className="text-3xl mb-2"><FaUpload /></p>
                   <p className="font-medium">Arrastra un PDF aquí, o haz clic para seleccionar</p>
-                  <p className="text-sm mt-1">Solo archivos .pdf • Máximo 10MB</p>
+                  <p className="text-sm mt-1">Solo archivos .pdf • Máximo 50MB</p>
                 </div>
               )}
             </div>
@@ -174,34 +177,141 @@ export default function Upload() {
             )}
           </button>
         </form>
-      ) : (
-        /* Result card */
+
+      ) : !result.es_contrato ? (
+        /* ── Documento NO es contrato ── */
         <div className="bg-white shadow rounded-xl p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-bold text-gray-800"><GiBookmarklet className="inline-block mr-1" /> Contrato Analizado</h2>
-            <span
-              className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                result.tipo_documento === 'digital'
-                  ? 'bg-green-100 text-green-700'
-                  : 'bg-yellow-100 text-yellow-700'
-              }`}
-            >
-              
-              {result.tipo_documento === 'digital' ? <GiCheckMark className="inline-block text-green-500" /> : <GiCyberEye  className="inline-block text-blue-500"/>}
-              
+          <div className="flex items-center gap-3">
+            <span className="text-3xl">⚠️</span>
+            <div>
+              <h2 className="text-xl font-bold text-gray-800">Documento no reconocido como contrato</h2>
+              <p className="text-sm text-gray-500">{result.mensaje}</p>
+            </div>
+          </div>
+
+          {/* Tipo y descripción */}
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 space-y-1">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Tipo de documento</p>
+            <p className="text-gray-800 font-medium">{result.tipo_documento}</p>
+            <p className="text-gray-600 text-sm mt-1">{result.descripcion}</p>
+          </div>
+
+          {/* Datos relevantes */}
+          {result.datos_relevantes && (
+            <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Datos identificados</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                <Field label="Título"    value={result.datos_relevantes.titulo} />
+                <Field label="Fecha"     value={result.datos_relevantes.fecha} />
+                <Field label="Monto"     value={result.datos_relevantes.monto} />
+                <Field label="Propósito" value={result.datos_relevantes.proposito} />
+              </div>
+
+              {result.datos_relevantes.partes_involucradas?.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                    Partes involucradas
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {result.datos_relevantes.partes_involucradas.map((parte, i) => (
+                      <span key={i} className="bg-gray-100 text-gray-700 text-xs px-2 py-1 rounded-full">
+                        {parte}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <p className="text-xs text-gray-400 italic">
+            Este documento no fue guardado en la base de datos.
+          </p>
+
+          <button
+            onClick={handleReset}
+            className="w-full mt-2 border border-yellow-500 text-yellow-600 hover:bg-yellow-50 font-semibold py-2.5 rounded-lg transition-colors"
+          >
+            Subir otro documento
+          </button>
+        </div>
+
+            
+      ) : (
+        /* ── Contrato analizado exitosamente ── */
+        <div className="bg-white shadow rounded-xl p-6 space-y-4">
+
+          {/* Header con tipo de documento detectado */}
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-gray-800">
+                <GiBookmarklet className="inline-block mr-1" /> Contrato Analizado
+              </h2>
+              <p className="text-sm font-medium text-blue-600 mt-0.5">
+                {result.tipo_documento_detectado || 'Contrato'}
+              </p>
+              {result.descripcion_documento && (
+                <p className="text-xs text-gray-500 mt-0.5">{result.descripcion_documento}</p>
+              )}
+            </div>
+            <span className={`shrink-0 px-3 py-1 rounded-full text-xs font-semibold ${
+              result.tipo_documento === 'digital'
+                ? 'bg-green-100 text-green-700'
+                : 'bg-yellow-100 text-yellow-700'
+            }`}>
+              {result.tipo_documento === 'digital' ? '📄 Digital' : '🖼️ OCR'}
             </span>
           </div>
 
+          {/* Datos relevantes del documento (de la detección) */}
+          {result.datos_relevantes && (
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 space-y-2">
+              <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">
+                📋 Información del documento
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                {result.datos_relevantes.titulo && (
+                  <Field label="Título" value={result.datos_relevantes.titulo} />
+                )}
+                {result.datos_relevantes.proposito && (
+                  <Field label="Propósito" value={result.datos_relevantes.proposito} />
+                )}
+                {result.datos_relevantes.monto && (
+                  <Field label="Monto" value={result.datos_relevantes.monto} />
+                )}
+              </div>
+              {result.datos_relevantes.partes_involucradas?.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                    Partes involucradas
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {result.datos_relevantes.partes_involucradas.map((parte, i) => (
+                      <span key={i} className="bg-white border border-blue-200 text-blue-700 text-xs px-2 py-1 rounded-full">
+                        {parte}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Campos del contrato */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-            <Field label="Requisición" value={result.data?.requisicion} />
-            <Field label="Proveedor" value={result.data?.proveedor} />
-            <Field label="Contratante" value={result.data?.contratante} />
-            <Field label="Fecha Inicio" value={result.data?.fecha_inicio} />
-            <Field label="Fecha Fin" value={result.data?.fecha_fin} />
+            <Field label="Requisición"     value={result.data?.requisicion} />
+            <Field label="Proveedor"        value={result.data?.proveedor} />
+            <Field label="Contratante"      value={result.data?.contratante} />
+            <Field label="Fecha Inicio"     value={result.data?.fecha_inicio} />
+            <Field label="Fecha Fin"        value={result.data?.fecha_fin} />
             <Field label="Penalización SLA" value={result.data?.Penalizacion_sla} />
             <Field
               label="Terminación Anticipada"
-              value={result.data?.TerminacionAnticipada ? <GiCheckMark className="inline-block text-green-500" /> : <GiCancel className="inline-block text-red-500" />}
+              value={
+                result.data?.TerminacionAnticipada
+                  ? <GiCheckMark className="inline-block text-green-500" />
+                  : <GiCancel className="inline-block text-red-500" />
+              }
             />
           </div>
 
@@ -217,6 +327,21 @@ export default function Upload() {
             <div className="border border-gray-200 rounded-lg p-4">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Notas</p>
               <p className="text-gray-700 text-sm">{result.data.notas}</p>
+            </div>
+          )}
+
+          {/* Consumo */}
+          {result.consumo?.tokens && (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-500">
+              <p className="font-semibold mb-1">📊 Consumo</p>
+              <p>Modelo: {result.consumo.tokens.modelo} ({result.consumo.tokens.modo})</p>
+              <p>Tokens: {result.consumo.tokens.total?.toLocaleString()}</p>
+              {result.consumo.tokens.costo_usd > 0 && (
+                <p>Costo IA: ${result.consumo.tokens.costo_usd} USD</p>
+              )}
+              {result.consumo.vision && (
+                <p>Vision OCR: {result.consumo.vision.paginas} págs. — ${result.consumo.vision.costo_usd} USD</p>
+              )}
             </div>
           )}
 
