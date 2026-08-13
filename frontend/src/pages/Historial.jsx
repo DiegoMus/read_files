@@ -1,15 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { FcDocument } from "react-icons/fc";
-import { GiCheckMark, GiNightVision, GiCancel, GiCyberEye , GiBookmarklet } from "react-icons/gi";
+import { GiCheckMark, GiCancel, GiCyberEye, GiBookmarklet } from "react-icons/gi";
 import { MdPictureAsPdf } from "react-icons/md";
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
 function formatDate(dateStr) {
   if (!dateStr) return '—'
-  return new Date(dateStr).toLocaleDateString('es-MX', {
+  return new Date(dateStr).toLocaleDateString('es-GT', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -21,6 +20,7 @@ export default function Historial() {
   const [contracts, setContracts] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     const fetchContracts = async () => {
@@ -40,9 +40,10 @@ export default function Historial() {
     <main className="max-w-7xl mx-auto px-4 py-10">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-800"> <GiBookmarklet  className="inline-block mr-1" /> Historial de Contratos</h1>
-          
-          <p className="text-gray-500 mt-1">Todos los contratos procesados</p>
+          <h1 className="text-2xl font-bold text-gray-800">
+            <GiBookmarklet className="inline-block mr-1" /> Historial de Contratos
+          </h1>
+          <p className="text-gray-500 mt-1">Haz clic en una fila para ver el detalle completo</p>
         </div>
         <Link
           to="/"
@@ -92,12 +93,17 @@ export default function Historial() {
                   <th className="px-4 py-3 text-left">Tipo SLA</th>
                   <th className="px-4 py-3 text-center">Term. Anticip.</th>
                   <th className="px-4 py-3 text-center">Tipo Doc</th>
+                  <th className="px-4 py-3 text-center">SIB</th>
                   <th className="px-4 py-3 text-left">Fecha Carga</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {contracts.map((c) => (
-                  <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                  <tr
+                    key={c.id}
+                    className="hover:bg-blue-50 transition-colors cursor-pointer"
+                    onClick={() => navigate(`/contrato/${c.id}`)}
+                  >
                     <td className="px-4 py-3 font-medium text-gray-800">{c.requisicion || '—'}</td>
                     <td className="px-4 py-3 text-gray-700">{c.proveedor || '—'}</td>
                     <td className="px-4 py-3 text-gray-700">{c.contratante || '—'}</td>
@@ -105,22 +111,29 @@ export default function Historial() {
                     <td className="px-4 py-3 text-gray-600">{formatDate(c.fin)}</td>
                     <td className="px-4 py-3 text-gray-600">{c.tipo_sla || '—'}</td>
                     <td className="px-4 py-3 text-center">
-                      {c.terminacion_anticipada ? <GiCheckMark className="inline-block text-green-500" /> : <GiCancel className="inline-block text-red-500" />}
+                      {c.terminacion_anticipada
+                        ? <GiCheckMark className="inline-block text-green-500" />
+                        : <GiCancel className="inline-block text-red-500" />}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${
-                          c.tipo_documento === 'digital'
-                            ? 'bg-green-100 text-green-700'
-                            : 'bg-blue-100 text-blue-700'
-                        }`}
-                      >
-                        {c.tipo_documento === 'digital' ? <GiCheckMark className="inline-block text-green-500" /> : <GiCyberEye  className="inline-block text-blue-500"/>}
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${
+                        c.tipo_documento === 'digital'
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {c.tipo_documento === 'digital'
+                          ? <GiCheckMark className="inline-block text-green-500" />
+                          : <GiCyberEye className="inline-block text-blue-500" />}
                       </span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      {c.sib_data
+                        ? <span className="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">🏛️</span>
+                        : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-4 py-3 text-gray-500">
                       {c.created_at
-                        ? new Date(c.created_at).toLocaleString('es-MX', {
+                        ? new Date(c.created_at).toLocaleString('es-GT', {
                             dateStyle: 'short',
                             timeStyle: 'short',
                           })
